@@ -177,18 +177,30 @@ class CrossAttention(nn.Module):
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
-        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
+        if not exists(mask):
+            G = 128 # Granularity, trade-off between speed and memory consumption
+            out_list = []
+            # Build the result block by block, reusing temporary storage
+            for i in range(0, q.shape[1]+G, G):
+                q_ = q[:, i:i + G,:] # Fragment the Q tensor
+                out = einsum('b i d, b j d -> b i j', q_, k) * self.scale
+                out = out.softmax(dim=-1)
+                out_list += [einsum('b i j, b j d -> b i d', out, v)]
+            del q, k, v
+            out = torch.cat(out_list, dim=1) # Reassemble the result
+        else: # Old code path
+            sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
 
-        if exists(mask):
-            mask = rearrange(mask, 'b ... -> b (...)')
-            max_neg_value = -torch.finfo(sim.dtype).max
-            mask = repeat(mask, 'b j -> (b h) () j', h=h)
-            sim.masked_fill_(~mask, max_neg_value)
+            if exists(mask):
+                mask = rearrange(mask, 'b ... -> b (...)')
+                max_neg_value = -torch.finfo(sim.dtype).max
+                mask = repeat(mask, 'b j -> (b h) () j', h=h)
+                sim.masked_fill_(~mask, max_neg_value)
 
-        # attention, what we cannot get enough of
-        attn = sim.softmax(dim=-1)
+            # attention, what we cannot get enough of
+            attn = sim.softmax(dim=-1)
 
-        out = einsum('b i j, b j d -> b i d', attn, v)
+            out = einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
         return self.to_out(out)
 
